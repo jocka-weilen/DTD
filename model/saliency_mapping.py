@@ -81,6 +81,7 @@ class ActivationStoringNet(nn.Module):
                 module, activation = self.bottleneck_forward(module, activation)
                 module_stack.append(module)
             else:
+                # print(activation.shape)
                 module.activation = activation
                 module_stack.append(module)
                 activation = module(activation)
@@ -99,10 +100,14 @@ class DTD(nn.Module):
         self.highest = highest
 
     def forward(self, module_stack, y, class_num, model_archi):
+        # y =  torch.Size([1, 1000]) model_archi = 1000 class_num = 1000 en(module_stack)) = 52
+        # 生成一个 one - hot 编码
+        # torch.max(y, 1) 是 PyTorch 中的一个函数，用于 沿着张量的指定维度（这里是维度1）查找最大值及其对应的索引
         R = torch.eye(class_num)[torch.max(y, 1)[1]]
-
         for i in range(len(module_stack)):
+            # 返回栈顶的元素
             module = module_stack.pop()
+            # 最后一层即图像层（原始输入的图）
             if len(module_stack) == 0:
                 if isinstance(module, nn.Linear):
                     activation = module.activation
@@ -119,13 +124,14 @@ class DTD(nn.Module):
             else:
                 if isinstance(module, nn.AdaptiveAvgPool2d):
                     if model_archi == 'vgg':
+                        # 将 tensor转换为适当的形式，R =[1,25088]->[1,512,7,7]
                         R = R.view(R.size(0), -1, 7, 7)
                         continue
                     elif model_archi == 'resnet':
                         R = R.view(R.size(0), R.size(1), 1, 1)
                 activation = module.activation
                 R = self.R_calculate(activation, module, R)
-
+                # print(R.shape)
         return R
 
     def basic_block_R_calculate(self, basic_block, R):
@@ -193,12 +199,15 @@ class DTD(nn.Module):
             raise RuntimeError(f"{type(module)} can not handled currently")
 
     def backprop_dense(self, activation, module, R):
+        # 获取全连接层的权重矩阵 weight，并截断负值为 0（仅保留非负权重） W = torch.Size([1000, 4096])
         W = torch.clamp(module.weight, min=0)
+        # torch.mm 是矩阵乘法
         Z = torch.mm(activation, torch.transpose(W, 0, 1)) + 1e-9
         S = R / Z
+
         C = torch.mm(S, W)
         R = activation * C
-
+        # torch.Size([1, 4096])
         return R
 
     def backprop_dense_input(self, activation, module, R):
@@ -284,6 +293,7 @@ class DTD(nn.Module):
                                   padding=padding, return_indices=True)
         Z = Z + 1e-9
         S = R / Z
+        # 进行反池化操作，其余位置使用 0 进行填充
         C = F.max_unpool2d(S, indices, kernel_size=kernel_size, stride=stride, \
                             padding=padding, output_size=activation.shape)
         R = activation * C
