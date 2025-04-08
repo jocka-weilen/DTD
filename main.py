@@ -16,6 +16,7 @@ from torchvision.utils import save_image
 from torchvision import transforms
 from torchvision import datasets
 from torch.utils.data import DataLoader
+from utils.MyImageFolder import MyImageFolder
 from model import *
 from model import saliency_mapping as sa_map
 from torch.autograd import Variable
@@ -32,12 +33,12 @@ def accuracy(output, target, topk=(1,)):
 
         res = []
         for k in topk:
-            correct_k = correct[:k].view(-1).float().sum(0, keepdim=True)
+            correct_k = correct[:k].reshape(-1).float().sum(0, keepdim=True)
             res.append(correct_k.mul_(100.0 / batch_size))
         return res
 
 
-def test(args):
+def main1(args):
 
     logger = logging.getLogger()
     logger.setLevel("DEBUG")
@@ -48,14 +49,15 @@ def test(args):
     stream_handler.setFormatter(formatter)
     logger.addHandler(stream_handler)
     logging.info('data loading')
-
-    test_dataset = datasets.ImageFolder(
+    # 加载要生成DTD 图像的数据
+    test_dataset = MyImageFolder(
         args.test_dir,
         transforms.Compose([
             transforms.Resize(224),
             transforms.CenterCrop(224),
             transforms.ToTensor(),
         ]))
+    # args.batch_size=16
     test_loader = DataLoader(test_dataset, batch_size=args.batch_size,
                              num_workers=args.num_workers, pin_memory=True, shuffle=False,
                              drop_last=False)
@@ -96,7 +98,12 @@ def test(args):
         raise ValueError(f"{args.model} is not available")
         
     model.train(False)
+    print("model----->")
+    # print(model)
+    # quit()
+    # vgg_16
     module_list = sa_map.model_flattening(model)
+    #
     act_store_model = sa_map.ActivationStoringNet(module_list)
     DTD = sa_map.DTD()
     loss_func = nn.CrossEntropyLoss()
@@ -107,10 +114,9 @@ def test(args):
     test_top5 = 0
     test_count = 0
     with torch.no_grad():
-        for i, (image, target) in enumerate(test_loader):
-            image = Variable(image)
-            target = Variable(target)
-
+        for i, (image, target, img_name) in enumerate(test_loader):
+            # 现在 方法已经弃用，可以直接使用 tensor
+            # print(module_stack == module_list)
             module_stack, output = act_store_model(image)
             loss = loss_func(output, target)
             acc1, acc5 = accuracy(output, target, topk=(1, 5))
@@ -119,25 +125,31 @@ def test(args):
             test_top1_avg = test_top1 / test_count
             test_top5 += acc5[0] * image.size(0)
             test_top5_avg = test_top5 / test_count
+            #
+            if i % 1 == 0:
+                # logging.info('sample saliency map generation')
 
-            if i % 20 == 0:
-                logging.info('sample saliency map generation')
                 saliency_map = DTD(module_stack, output, 1000, model_archi)
                 saliency_map = torch.sum(saliency_map, dim=1)
-                saliency_map_sample = saliency_map[0].detach().numpy()
-                saliency_map_sample = np.maximum(0, saliency_map_sample)*255*args.heatmap_scale
-                saliency_map_sample = np.minimum(255, saliency_map_sample)
-                saliency_map_sample = np.uint8(saliency_map_sample)
-                saliency_heatmap = cv2.applyColorMap(saliency_map_sample, cv2.COLORMAP_BONE)
-                if not os.path.exists(args.sample_dir):
-                    os.mkdir(args.sample_dir)
-                heatmap_name = f"{i}th_sample.png"
-                cv2.imwrite(os.path.join(args.sample_dir, heatmap_name), saliency_heatmap)
-                sample_origin = image.cpu().data[0]
-                origin_name = f"{i}th_origin.png"
-                save_image(sample_origin, os.path.join(args.sample_dir, origin_name))
+                print(saliency_map.shape[0])
 
-            logging.info((f"Test, step #{i}/{len(test_loader)},, "
+                for save_i in range(0, saliency_map.shape[0], 1):
+                    logging.info(f'正在处理第{save_i + 1}张图片')
+                    saliency_map_sample = saliency_map[save_i].detach().numpy()
+                    saliency_map_sample = np.maximum(0, saliency_map_sample)*255*args.heatmap_scale
+                    saliency_map_sample = np.minimum(255, saliency_map_sample)
+                    saliency_map_sample = np.uint8(saliency_map_sample)
+
+                    saliency_heatmap = cv2.applyColorMap(saliency_map_sample, cv2.COLORMAP_BONE)
+                    if not os.path.exists(args.sample_dir):
+                        os.mkdir(args.sample_dir)
+                    heatmap_name = f"{img_name[save_i]}.png"
+                    cv2.imwrite(os.path.join(args.sample_dir, heatmap_name), saliency_heatmap)
+                    # sample_origin = image.cpu().data[0]
+                    # origin_name = f"{save_i}th_origin.png"
+                    # save_image(sample_origin, os.path.join(args.sample_dir, origin_name))
+
+            logging.info((f"Test, step #{save_i}/{len(test_loader)},, "
                           f"top1 accuracy {test_top1_avg:.3f}, "
                           f"top5 accuracy {test_top5_avg:.3f}, "
                           f"loss {torch.mean(loss):.3f}, "))
@@ -153,11 +165,11 @@ def test(args):
 
 if __name__=='__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--test_dir', type=str, default=None,
+    parser.add_argument('--test_dir', type=str, default="dataset",
                         help='directory path of ImageNet dataset')
-    parser.add_argument('--batch_size', type=int, default=16,
+    parser.add_argument('--batch_size', type=int, default=6,
                         help='batch size of inference')
-    parser.add_argument('--num_workers', type=int, default=1)
+    parser.add_argument('--num_workers', type=int, default=8)
     parser.add_argument('--heatmap_scale', type=int, default=5000,
                         help='scale value for heatmap visualization')
     parser.add_argument('--model', type=str, default='vgg16_bn',
@@ -170,6 +182,6 @@ if __name__=='__main__':
     args = parser.parse_args()
 
     try:
-        test(args)
+        main1(args)
     except Exception:
         logging.exception("Testing is falied")
